@@ -29,9 +29,12 @@ P = {
     "seek_t": 120.0,
     "hide_multi": True,        # vs 2+ enemies: break line of sight, fight only those who come close
     "hide_close": 45.0,
-    "assess": True,            # judge fights before taking them; hide quietly from ones we'd lose
-    "engage_margin": 2.5,      # fight if (time to kill them) < margin * (time for them to kill us)
-    "assess_close": 35.0,      # closer than this, always fight
+    "stealth": True,           # opening: hide in an enclosed spot, stay silent, let the others thin out
+    "stealth_t": 100.0,        # stealth lasts until this match time...
+    "stealth_alive": 11,       # ...or until this few mechs are left
+    "stealth_close": 40.0,     # an enemy closer than this (or being hit) ends stealth for the moment
+    "stealth_engaged_s": 10.0, # after being hit, keep fighting this long instead of going quiet
+    "tree_min_r": 5.0,         # crowns at least this wide hide a mech standing at their center
 }
 # How much we like each weapon in slot 1 (we always keep the gun in slot 0)
 WEAPON_RANK = {"laser": 4.0, "lightning": 3.0, "mortar": -5.0, "gun": 0.0}
@@ -75,6 +78,27 @@ class Bot:
         t0 = time.time()
         self.map = WorldMap(hello["map"]["dir"])
         mf.log(f"map loaded in {time.time() - t0:.2f}s")
+        # big tree crowns: canopy blocks vision (not movement or shots), so standing inside one hides us
+        self.big_trees = []
+        try:
+            import json as _json
+            import os as _os
+            w = _json.load(open(_os.path.join(hello["map"]["dir"], "v2", "world.json")))
+            f = w["trees"]["fields"]
+            dat = w["trees"]["data"]
+            n = len(f)
+            for i in range(0, len(dat) - n + 1, n):
+                r = dict(zip(f, dat[i:i + n]))
+                if r.get("crownR", 0) >= P["tree_min_r"] and r.get("crownBase", 99) <= 4.5:
+                    cx, cy = r.get("crownX", r["x"]), r.get("crownY", r["y"])
+                    # the mech (radius 2.5 m) must fit at the crown center, clear of walls
+                    if self.map.free_at(cx, cy) and all(
+                            self.map.free_at(cx + 3.5 * math.cos(k * TAU / 8), cy + 3.5 * math.sin(k * TAU / 8))
+                            for k in range(8)):
+                        self.big_trees.append((cx, cy, r["crownR"]))
+        except Exception as ex:  # never let map extras break the bot
+            mf.log(f"trees not loaded: {ex}")
+        mf.log(f"big trees: {len(self.big_trees)}")
         c = self.cfg
         self.reach = c["loot"]["pickup_radius"]
         self.cube_reach = c["cubes"].get("pickup_radius", 3.5)
@@ -364,10 +388,6 @@ class Bot:
         key = radii
         if self.cover_pt is not None and t - self.cover_t < 0.6 and self.cover_key == key:
             return self.cover_pt
-        if time.perf_counter() - self.t_start > 0.015:
-            return self.cover_pt  # out of time budget this tick: reuse the last answer
-        if len(threats_pos) > 4:
-            threats_pos = sorted(threats_pos, key=lambda p: dist2(p, pos))[:4]
         self.cover_key = key
         cands = []
         for r in radii:
@@ -426,6 +446,58 @@ class Bot:
                 bs, best = s, p
         self.exp_goal, self.exp_t = best, t
         return best
+
+    def hide_spot(self, pos, circ, t):
+        """Enclosed spot nearby: buildings block most sightlines, so others rarely see us."""
+        import numpy as np
+        hs = getattr(self, "hs", None)
+        if hs is not None and hs.get("tree") and hs["best"] is not None and self.in_circle(hs["best"], circ, -12):
+            return hs["best"]  # settled inside a crown: stay put (moving makes noise)
+        if hs is None or t - hs["t"] > 12 or (hs["best"] is not None and not self.in_circle(hs["best"], circ, -12)):
+            cands = []
+            for _ in range(70):
+                a = self.rng.random() * TAU
+                rr = 140 * math.sqrt(self.rng.random())
+                p = (pos[0] + math.cos(a) * rr, pos[1] + math.sin(a) * rr)
+                if self.map.free_at(*p) and self.in_circle(p, circ, -15):
+                    cands.append(p)
+            bad = getattr(self, "bad_spots", [])
+            trees = [(tx, ty, tr) for tx, ty, tr in self.big_trees
+                     if dist2(pos, (tx, ty)) < 170 and self.in_circle((tx, ty), circ, -15)
+                     and all(dist2((tx, ty), b) > 3 for b in bad)]
+            trees.sort(key=lambda z: dist2(pos, z[:2]))
+            cands = [("tree", z) for z in trees[:25]] + cands
+            keep = hs["best"] if hs is not None and hs["best"] is not None and self.in_circle(hs["best"], circ, -12) \
+                and all(dist2(hs["best"], b) > 3 for b in getattr(self, "bad_spots", [])) else None
+            if keep is not None:
+                cands.insert(0, keep)
+            hs = self.hs = {"t": t, "cands": cands, "i": 0, "best": keep, "bs": 1e18 if keep is None else hs["bs"]}
+            if keep is not None:
+                hs["bs"] = 1e18
+                hs["i"] = 0
+        dirs = getattr(self, "hs_dirs", None)
+        if dirs is None:
+            dirs = self.hs_dirs = [(math.cos(k * TAU / 24), math.sin(k * TAU / 24)) for k in range(24)]
+        while hs["i"] < len(hs["cands"]) and time.perf_counter() - self.t_start < 0.012:
+            c = hs["cands"][hs["i"]]
+            hs["i"] += 1
+            if isinstance(c[0], str):
+                tx, ty, tr = c[1]
+                # inside a big crown nobody beyond 45 m sees us, whatever the buildings do
+                sc = 5 - min(tr, 10) * 3 + dist2(pos, (tx, ty)) * 0.2 \
+                    + abs(dist2((tx, ty), circ[0]) / max(circ[1], 1) - 0.55) * 30
+                if sc < hs["bs"]:
+                    hs["bs"], hs["best"] = sc, (tx, ty)
+                continue
+            gz = self.map.surface_at(*c)
+            eye = (c[0], c[1], gz + 8.0)
+            pts = [(c[0] + dx * 80, c[1] + dy * 80, gz + 8.0) for dx, dy in dirs]
+            open_frac = float(np.mean(self.map.los_many(eye, pts)))
+            # few open sightlines; not far to walk; off-center (traffic passes the middle) but not near the edge
+            sc = open_frac * 100 + dist2(pos, c) * 0.12 + abs(dist2(c, circ[0]) / max(circ[1], 1) - 0.55) * 30
+            if sc < hs["bs"]:
+                hs["bs"], hs["best"] = sc, c
+        return hs["best"]
 
     def idle_spot(self, pos, circ, t):
         """A quiet spot near a building inside the safe circle."""
@@ -503,6 +575,21 @@ class Bot:
             mode = "zone" if mode != "retreat" else "retreat"
         self.mode = mode if mode == "retreat" else self.mode if self.mode == "retreat" else mode
 
+        if P["stealth"] and mode in ("loot", "fight") and t < P["stealth_t"] and obs["alive"] > P["stealth_alive"]:
+            close = target is not None and dist2(pos, target["pos"]) < P["stealth_close"]
+            # once someone is shooting at us, hiding without shooting back just loses: fight it out
+            engaged = t - self.last_dmg_t < P["stealth_engaged_s"]
+            for e in vis:
+                if e.get("kind") != "mech":
+                    continue
+                to_me = math.atan2(pos[1] - e["pos"][1], pos[0] - e["pos"][0])
+                if abs(wrap((e.get("aim") or [9, 0])[0] - to_me)) < 0.2 and dist2(pos, e["pos"]) < 200:
+                    engaged = True  # it is looking right at us
+            # a badly hurt enemy in reach is a free placement: take it
+            weak = target is not None and hp_frac > 0.7 and dist2(pos, target["pos"]) < 150 \
+                and (target.get("hp") or 1400) / max(1, target.get("max_hp") or 1400) < 0.35
+            if not engaged and not close and not weak:
+                mode = "stealth"
         move = (0.0, 0.0)
         boost = False
         label = mode
@@ -531,6 +618,37 @@ class Bot:
                 move = norm2(aw[0] + 0.5 * tc[0], aw[1] + 0.5 * tc[1])
                 label = "retreat->away"
             boost = me["energy"] > 15
+        elif mode == "stealth":
+            self.avoiding = True
+            goal, why = self.loot_goal(obs, circ, hp_frac)
+            if goal is None or why == "drop" or why.startswith("roof") or dist2(pos, goal) > 45 or recent_enemy:
+                goal = self.hide_spot(pos, circ, t)
+                why = "stealth"
+            if goal is not None and why == "stealth":
+                # give up on a spot we can't reach (wall in the way): no progress for 5 s
+                d_goal = dist2(pos, goal)
+                pr = getattr(self, "hs_prog", None)
+                if pr is None or pr[0] != goal:
+                    self.hs_prog = [goal, d_goal, t]
+                elif d_goal < pr[1] - 1.0:
+                    pr[1], pr[2] = d_goal, t
+                elif d_goal > 2.5 and t - pr[2] > 5.0:
+                    self.bad_spots = getattr(self, "bad_spots", []) + [goal]
+                    self.hs = None
+                    self.hs_prog = None
+            if goal is not None and why == "stealth" and dist2(pos, goal) < 2.5:
+                hs = getattr(self, "hs", None)
+                if hs is not None and any(abs(goal[0] - tx) < 0.01 and abs(goal[1] - ty) < 0.01 for tx, ty, _ in self.big_trees):
+                    hs["tree"] = True
+                move = (0.0, 0.0)
+                label = "stealth-tree" if hs is not None and hs.get("tree") else "stealth-hold"
+                goal = None
+            if goal is not None:
+                move = self.plan_move(pos, goal, t)
+                near = [e for e in self.enemies.values() if t - e["t"] < 8 and dist2(pos, e["pos"]) < 130]
+                if near or dist2(pos, goal) < 15:
+                    move = (move[0] * 0.4, move[1] * 0.4)  # below step-sound speed
+                label = why
         elif mode == "fight" and target is not None:
             move, boost = self.fight_move(obs, target, circ, t)
             label = f"fight {target['id']} {self.fight_label}"
@@ -625,40 +743,6 @@ class Bot:
             r = min(r, 40.0)
         return r
 
-    @staticmethod
-    def _dps(kinds, d, cubes, vs_kinds):
-        """Rough expected damage per second from a weapon set at distance d."""
-        acc = max(0.3, min(0.9, 1.15 - d / 220.0))
-        dps = 0.0
-        if "gun" in kinds and d < 230:
-            dps += 187.0 * acc
-        if "laser" in kinds and d < 280:
-            dps += 131.0 * (0.85 if d > 30 else 0.6) * (1.6 if "mortar" in vs_kinds else 1.0)
-        if "lightning" in kinds and d < 45:
-            dps += 200.0
-        if "mortar" in kinds and 25 < d < 230:
-            dps += 50.0
-        return dps * (1 + 0.04 * min(cubes or 0, 10))
-
-    def fight_favorable(self, target, others, t):
-        me = self.me
-        pos = me["pos"]
-        mine = [w["kind"] for w in me["weapons"] if w]
-        d = dist2(pos, target["pos"])
-        theirs = target.get("weapons") or ["gun"]
-        # our laser is useless for a while if their lightning can reach us
-        my_dps = self._dps(mine, d, me.get("cubes", 0), theirs)
-        if "lightning" in theirs and "laser" in mine and d < 50:
-            my_dps -= 131.0 * 0.85 * 0.7
-        their_dps = self._dps(theirs, d, target.get("cubes", 0), mine)
-        for o in others:
-            od = dist2(pos, o["pos"])
-            their_dps += self._dps(o.get("weapons") or ["gun"], od, o.get("cubes", 0), mine) * 0.8
-        their_hp = target.get("hp") or 1400
-        ttk_them = their_hp / max(my_dps, 1.0)
-        ttk_us = me["hp"] / max(their_dps, 1.0)
-        return ttk_them < P["engage_margin"] * ttk_us
-
     def fight_move(self, obs, target, circ, t):
         me = self.me
         pos = me["pos"]
@@ -687,19 +771,6 @@ class Bot:
         ambush = ("laser" in ew and not (held & {"laser", "lightning"}) and d > 60)
         others = [e for e in self.enemies.values() if e["id"] != target["id"] and t - e["t"] < 3
                   and dist2(pos, e["pos"]) < 230]
-        if P["assess"] and d > P["assess_close"] and not my_charging \
-                and not self.fight_favorable(target, others, t):
-            tps = [(e["pos"][0], e["pos"][1], e["pos"][2] + 8) for e in others + [target]]
-            cov = self.find_cover(pos, tps, circ, t, radii=(5, 9, 14, 20, 28, 38, 50, 65))
-            if cov is not None:
-                self.avoiding = t - self.last_dmg_t > 2.0  # stay quiet unless they're already shooting us
-                self.fight_label = "avoid"
-                mv = self.plan_move(pos, cov, t)
-                watched = any(abs(wrap((e.get("aim") or [9, 0])[0] - math.atan2(pos[1] - e["pos"][1], pos[0] - e["pos"][0]))) < 0.3
-                              for e in others + [target])
-                if self.avoiding and not watched and dist2(pos, target["pos"]) > 90:
-                    return (mv[0] * 0.4, mv[1] * 0.4), False  # walk silently (no step sounds)
-                return mv, me["energy"] > 20
         if P["hide_multi"] and others and d > P["hide_close"] and not my_charging:
             tps = [(e["pos"][0], e["pos"][1], e["pos"][2] + 8) for e in others + [target]]
             cov = self.find_cover(pos, tps, circ, t, radii=(5, 9, 14, 20, 28, 38, 50, 65))
