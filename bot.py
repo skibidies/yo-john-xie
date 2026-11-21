@@ -29,7 +29,9 @@ P = {
     "seek_t": 120.0,
     "hide_multi": True,        # vs 2+ enemies: break line of sight, fight only those who come close
     "hide_close": 45.0,
-    "stand_no_cover": True,    # when retreating with no cover in reach, keep fighting instead of running
+    "assess": True,            # judge fights before taking them; hide quietly from ones we'd lose
+    "engage_margin": 2.5,      # fight if (time to kill them) < margin * (time for them to kill us)
+    "assess_close": 35.0,      # closer than this, always fight
 }
 # How much we like each weapon in slot 1 (we always keep the gun in slot 0)
 WEAPON_RANK = {"laser": 4.0, "lightning": 3.0, "mortar": -5.0, "gun": 0.0}
@@ -362,6 +364,10 @@ class Bot:
         key = radii
         if self.cover_pt is not None and t - self.cover_t < 0.6 and self.cover_key == key:
             return self.cover_pt
+        if time.perf_counter() - self.t_start > 0.015:
+            return self.cover_pt  # out of time budget this tick: reuse the last answer
+        if len(threats_pos) > 4:
+            threats_pos = sorted(threats_pos, key=lambda p: dist2(p, pos))[:4]
         self.cover_key = key
         cands = []
         for r in radii:
@@ -449,6 +455,7 @@ class Bot:
     # ------------------------------------------------------------------ main
     def act(self, obs):
         self.t_start = time.perf_counter()
+        self.avoiding = False
         self.me = me = obs["self"]
         t = obs["t"]
         pos = me["pos"]
@@ -515,10 +522,6 @@ class Bot:
                 goal = cov
                 move = self.plan_move(pos, goal, t)
                 label = "retreat->cover"
-            elif target is not None and P["stand_no_cover"]:
-                # no cover nearby: running across open ground just gives free shots, so keep fighting
-                move, _ = self.fight_move(obs, target, circ, t)
-                label = "retreat->stand"
             else:
                 # run directly away from the enemies' mean, toward the safe circle center
                 ax = sum(tp[0] for tp in tps) / len(tps)
@@ -622,6 +625,40 @@ class Bot:
             r = min(r, 40.0)
         return r
 
+    @staticmethod
+    def _dps(kinds, d, cubes, vs_kinds):
+        """Rough expected damage per second from a weapon set at distance d."""
+        acc = max(0.3, min(0.9, 1.15 - d / 220.0))
+        dps = 0.0
+        if "gun" in kinds and d < 230:
+            dps += 187.0 * acc
+        if "laser" in kinds and d < 280:
+            dps += 131.0 * (0.85 if d > 30 else 0.6) * (1.6 if "mortar" in vs_kinds else 1.0)
+        if "lightning" in kinds and d < 45:
+            dps += 200.0
+        if "mortar" in kinds and 25 < d < 230:
+            dps += 50.0
+        return dps * (1 + 0.04 * min(cubes or 0, 10))
+
+    def fight_favorable(self, target, others, t):
+        me = self.me
+        pos = me["pos"]
+        mine = [w["kind"] for w in me["weapons"] if w]
+        d = dist2(pos, target["pos"])
+        theirs = target.get("weapons") or ["gun"]
+        # our laser is useless for a while if their lightning can reach us
+        my_dps = self._dps(mine, d, me.get("cubes", 0), theirs)
+        if "lightning" in theirs and "laser" in mine and d < 50:
+            my_dps -= 131.0 * 0.85 * 0.7
+        their_dps = self._dps(theirs, d, target.get("cubes", 0), mine)
+        for o in others:
+            od = dist2(pos, o["pos"])
+            their_dps += self._dps(o.get("weapons") or ["gun"], od, o.get("cubes", 0), mine) * 0.8
+        their_hp = target.get("hp") or 1400
+        ttk_them = their_hp / max(my_dps, 1.0)
+        ttk_us = me["hp"] / max(their_dps, 1.0)
+        return ttk_them < P["engage_margin"] * ttk_us
+
     def fight_move(self, obs, target, circ, t):
         me = self.me
         pos = me["pos"]
@@ -650,6 +687,19 @@ class Bot:
         ambush = ("laser" in ew and not (held & {"laser", "lightning"}) and d > 60)
         others = [e for e in self.enemies.values() if e["id"] != target["id"] and t - e["t"] < 3
                   and dist2(pos, e["pos"]) < 230]
+        if P["assess"] and d > P["assess_close"] and not my_charging \
+                and not self.fight_favorable(target, others, t):
+            tps = [(e["pos"][0], e["pos"][1], e["pos"][2] + 8) for e in others + [target]]
+            cov = self.find_cover(pos, tps, circ, t, radii=(5, 9, 14, 20, 28, 38, 50, 65))
+            if cov is not None:
+                self.avoiding = t - self.last_dmg_t > 2.0  # stay quiet unless they're already shooting us
+                self.fight_label = "avoid"
+                mv = self.plan_move(pos, cov, t)
+                watched = any(abs(wrap((e.get("aim") or [9, 0])[0] - math.atan2(pos[1] - e["pos"][1], pos[0] - e["pos"][0]))) < 0.3
+                              for e in others + [target])
+                if self.avoiding and not watched and dist2(pos, target["pos"]) > 90:
+                    return (mv[0] * 0.4, mv[1] * 0.4), False  # walk silently (no step sounds)
+                return mv, me["energy"] > 20
         if P["hide_multi"] and others and d > P["hide_close"] and not my_charging:
             tps = [(e["pos"][0], e["pos"][1], e["pos"][2] + 8) for e in others + [target]]
             cov = self.find_cover(pos, tps, circ, t, radii=(5, 9, 14, 20, 28, 38, 50, 65))
@@ -895,6 +945,11 @@ class Bot:
                 fire[li] = True  # keep holding until a target shows (auto-fires after hold_s)
         mnp, mxp = me["stats"].get("min_pitch", -0.7), me["stats"].get("max_pitch", 1.3)
         act["aim"] = [round(wrap(aim[0]), 4), round(max(mnp, min(mxp, aim[1])), 4)]
+        if getattr(self, "avoiding", False):
+            li, laser = self.weapon("laser")
+            fire = [False, False]
+            if laser is not None and laser.get("charge", 0) > 0 and li is not None:
+                fire[li] = True  # keep holding a started charge rather than wasting it
         act["fire"] = fire
 
     def side_target(self, obs):
