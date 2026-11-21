@@ -17,8 +17,8 @@ from worldmap import WorldMap
 TAU = 2 * math.pi
 # Tunable knobs (see README: change these, resubmit, compare scores)
 P = {
-    "retreat_hp": 0.6,        # retreat below this HP fraction when the enemy is healthier
-    "retreat_hp_outnumbered": 0.75,
+    "retreat_hp": 0.5,        # retreat below this HP fraction when the enemy is healthier
+    "retreat_hp_outnumbered": 0.65,
     "retreat_exit_hp": 0.9,    # come back out once regenerated to this
     "range_gun": 55.0,         # preferred fighting distance with gun only
     "range_laser": 95.0,
@@ -29,6 +29,7 @@ P = {
     "seek_t": 120.0,
     "hide_multi": True,        # vs 2+ enemies: break line of sight, fight only those who come close
     "hide_close": 45.0,
+    "stand_no_cover": True,    # when retreating with no cover in reach, keep fighting instead of running
 }
 # How much we like each weapon in slot 1 (we always keep the gun in slot 0)
 WEAPON_RANK = {"laser": 4.0, "lightning": 3.0, "mortar": -5.0, "gun": 0.0}
@@ -514,6 +515,10 @@ class Bot:
                 goal = cov
                 move = self.plan_move(pos, goal, t)
                 label = "retreat->cover"
+            elif target is not None and P["stand_no_cover"]:
+                # no cover nearby: running across open ground just gives free shots, so keep fighting
+                move, _ = self.fight_move(obs, target, circ, t)
+                label = "retreat->stand"
             else:
                 # run directly away from the enemies' mean, toward the safe circle center
                 ax = sum(tp[0] for tp in tps) / len(tps)
