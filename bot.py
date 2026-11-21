@@ -27,8 +27,8 @@ P = {
     "duck": True,              # hide from enemy laser charges / between our laser shots
     "seek": True,              # early game: spin-scan and explore for a laser/lightning
     "seek_t": 120.0,
-    "hide_multi": True,        # vs 2+ enemies: break line of sight, fight only those who come close
-    "hide_close": 28.0,
+    "hide_multi": False,        # vs 2+ enemies: break line of sight, fight only those who come close
+    "hide_close": 45.0,
 }
 # How much we like each weapon in slot 1 (we always keep the gun in slot 0)
 WEAPON_RANK = {"laser": 4.0, "lightning": 3.0, "mortar": -5.0, "gun": 0.0}
@@ -361,6 +361,10 @@ class Bot:
         key = radii
         if self.cover_pt is not None and t - self.cover_t < 0.6 and self.cover_key == key:
             return self.cover_pt
+        if time.perf_counter() - self.t_start > 0.015:
+            return self.cover_pt  # out of time budget this tick: reuse the last answer
+        if len(threats_pos) > 4:
+            threats_pos = sorted(threats_pos, key=lambda p: dist2(p, pos))[:4]
         self.cover_key = key
         cands = []
         for r in radii:
