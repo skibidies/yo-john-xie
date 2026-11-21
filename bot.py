@@ -26,12 +26,11 @@ P = {
     "boost_on": 65.0,          # start boost-strafing above this energy
     "duck": True,              # hide from enemy laser charges / between our laser shots
     "seek": True,              # early game: spin-scan and explore for a laser/lightning
-    "seek_t": 200.0,
+    "seek_t": 300.0,
     "hide_multi": True,        # vs 2+ enemies: break line of sight, fight only those who come close
     "hide_close": 45.0,
     "laser_first": True,       # keep hunting for a laser until we have one; grab nearby lasers even mid-fight
-    "laser_grab_r": 70.0,
-    "two_specials": True,      # with laser or lightning in hand, drop the starter gun for the other one
+    "laser_grab_r": 120.0,
 }
 # How much we like each weapon in slot 1 (we always keep the gun in slot 0)
 WEAPON_RANK = {"laser": 4.0, "lightning": 3.0, "mortar": -5.0, "gun": 0.0}
@@ -733,8 +732,6 @@ class Bot:
             if self.bad_items.get(pid, -1) > t or kind in held:
                 continue
             gain = WEAPON_RANK.get(kind, 0) - cur_rank
-            if self.pair_slot(kind) is not None:
-                gain = 1.5
             if gain <= 0.4:
                 continue
             if not self.in_circle(p, circ, -5):
@@ -775,17 +772,6 @@ class Bot:
         # shootable things: crates / drones -> stand within range and let aim_and_fire do it
         return None, ""
 
-    def pair_slot(self, kind):
-        """Slot of the starter gun if taking `kind` would give us both laser and lightning."""
-        if not P["two_specials"] or kind not in ("laser", "lightning"):
-            return None
-        held = {w["kind"] for w in self.me["weapons"] if w}
-        other = "lightning" if kind == "laser" else "laser"
-        if other in held and kind not in held:
-            gi, _ = self.weapon("gun")
-            return gi
-        return None
-
     def has_laser(self):
         return any(w and w["kind"] == "laser" for w in self.me["weapons"])
 
@@ -817,20 +803,6 @@ class Bot:
             g = WEAPON_RANK.get(p["kind"], 0) - cur_rank
             if g > 0.4 and (best is None or g > best[0]):
                 best = (g, p)
-        pair = None
-        for p in obs["pickups"]:
-            if self.bad_items.get(p["id"], -1) > t:
-                continue
-            if dist2(p["pos"], pos) > self.reach - 0.3 or abs(p["pos"][2] - pos[2]) > 3.8:
-                continue
-            gs = self.pair_slot(p["kind"])
-            if gs is not None:
-                pair = (gs, p)
-                break
-        if pair is not None:
-            act["drop"] = pair[0]  # drop the starter gun, keep both specials
-            act["take"] = pair[1]["id"]
-            return
         if best:
             if slot1 is not None:
                 if slot1["kind"] == "laser" and slot1.get("charge", 0) > 0:
