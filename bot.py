@@ -30,11 +30,12 @@ P = {
     "hide_multi": True,        # vs 2+ enemies: break line of sight, fight only those who come close
     "hide_close": 45.0,
     "stealth": True,           # opening: hide in an enclosed spot, stay silent, let the others thin out
-    "stealth_t": 420.0,        # stealth lasts until this match time...
-    "stealth_alive": 5,        # ...or until this few mechs are left
+    "stealth_t": 100.0,        # stealth lasts until this match time...
+    "stealth_alive": 11,       # ...or until this few mechs are left
     "stealth_close": 40.0,     # an enemy closer than this (or being hit) ends stealth for the moment
     "stealth_engaged_s": 10.0, # after being hit, keep fighting this long instead of going quiet
     "tree_min_r": 5.0,         # crowns at least this wide hide a mech standing at their center
+    "third_party": True,       # after stealth: when healthy and armed, move toward other mechs' fights
 }
 # How much we like each weapon in slot 1 (we always keep the gun in slot 0)
 WEAPON_RANK = {"laser": 4.0, "lightning": 3.0, "mortar": -5.0, "gun": 0.0}
@@ -447,6 +448,24 @@ class Bot:
         self.exp_goal, self.exp_t = best, t
         return best
 
+    def fight_sound_goal(self, obs, pos, circ, t):
+        """Head toward a fight we can hear (gunfire/lasers), stopping ~90 m short of it."""
+        for snd in obs.get("sounds", []):
+            if snd.get("kind") not in ("gun", "laser", "lightning", "explosion"):
+                continue
+            est = {"near": 50.0, "mid": 120.0, "far": 220.0}.get(snd.get("dist"), 120.0)
+            b = snd["bearing"]
+            src = (pos[0] + math.cos(b) * est, pos[1] + math.sin(b) * est)
+            if not self.in_circle(src, circ, 0):
+                continue
+            self.tp_goal = (pos[0] + math.cos(b) * max(0.0, est - 90), pos[1] + math.sin(b) * max(0.0, est - 90))
+            self.tp_t = t
+            break
+        g = getattr(self, "tp_goal", None)
+        if g is None or t - self.tp_t > 6 or dist2(pos, g) < 8:
+            return None
+        return g
+
     def hide_spot(self, pos, circ, t):
         """Enclosed spot nearby: buildings block most sightlines, so others rarely see us."""
         import numpy as np
@@ -664,6 +683,11 @@ class Bot:
             label = "under fire"
         else:
             goal, why = self.loot_goal(obs, circ, hp_frac)
+            if goal is None and P["third_party"] and hp_frac > 0.8 and t >= P["stealth_t"] \
+                    and any(w and w["kind"] in ("laser", "lightning") for w in me["weapons"]):
+                goal = self.fight_sound_goal(obs, pos, circ, t)
+                if goal is not None:
+                    why = "3rd-party"
             if goal is None and P["seek"] and me["weapons"][1] is None and t < P["seek_t"]:
                 goal = self.explore_goal(pos, circ, t)
                 why = "explore"
