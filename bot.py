@@ -31,8 +31,8 @@ P = {
     "hide_close": 45.0,
     "laser_first": True,       # keep hunting for a laser until we have one; grab nearby lasers even mid-fight
     "laser_grab_r": 70.0,
-    "finish": True,            # focus the weakest enemy; chase and never retreat from a nearly dead one
-    "finish_hp": 0.3,
+    "precharge": True,         # charge the laser behind cover so we peek out ready to fire at once
+    "precharge_r": 220.0,
 }
 # How much we like each weapon in slot 1 (we always keep the gun in slot 0)
 WEAPON_RANK = {"laser": 4.0, "lightning": 3.0, "mortar": -5.0, "gun": 0.0}
@@ -261,9 +261,6 @@ class Bot:
             los = self.map.los(mz, c)
             hpf = (e.get("hp") or 1400) / max(1, e.get("max_hp") or 1400)
             s = d + 120 * hpf + (0 if los else 90) + (0 if e["t"] == obs["t"] else 40)
-            if P["finish"]:
-                # absolute HP matters most: the enemy that dies first is the one worth shooting
-                s += 0.12 * (e.get("hp") or 1400) - (160 if hpf < P["finish_hp"] and d < 200 else 0)
             if e["id"] == self.target_id:
                 s -= 35
             if s < bs:
@@ -368,6 +365,10 @@ class Bot:
         key = radii
         if self.cover_pt is not None and t - self.cover_t < 0.6 and self.cover_key == key:
             return self.cover_pt
+        if time.perf_counter() - self.t_start > 0.015:
+            return self.cover_pt  # out of time budget this tick: reuse the last answer
+        if len(threats_pos) > 4:
+            threats_pos = sorted(threats_pos, key=lambda p: dist2(p, pos))[:4]
         self.cover_key = key
         cands = []
         for r in radii:
@@ -489,17 +490,10 @@ class Bot:
             ehp = (target.get("hp") or 1400) / max(1, target.get("max_hp") or 1400)
             losing = hp_frac < ehp - 0.1
         if self.mode == "retreat":
-            weak_t = P["finish"] and target is not None and dist2(pos, target["pos"]) < 120 and \
-                (target.get("hp") or 1400) / max(1, target.get("max_hp") or 1400) < P["finish_hp"] * 0.8 and \
-                (target.get("hp") or 1400) < me["hp"] * 0.8
-            if hp_frac > P["retreat_exit_hp"] or not recent_enemy or t > self.retreat_until or weak_t:
+            if hp_frac > P["retreat_exit_hp"] or not recent_enemy or t > self.retreat_until:
                 self.mode = "fight"
         else:
-            finishing = P["finish"] and target is not None and dist2(pos, target["pos"]) < 160 and \
-                (target.get("hp") or 1400) / max(1, target.get("max_hp") or 1400) < P["finish_hp"] and \
-                (target.get("hp") or 1400) < me["hp"]
-            if recent_enemy and not (finishing and hp_frac > 0.12) and \
-                    ((hp_frac < P["retreat_hp"] and losing) or (hp_frac < P["retreat_hp_outnumbered"] and n_threat >= 2) or hp_frac < 0.2):
+            if recent_enemy and ((hp_frac < P["retreat_hp"] and losing) or (hp_frac < P["retreat_hp_outnumbered"] and n_threat >= 2) or hp_frac < 0.2):
                 self.mode = "retreat"
                 self.retreat_until = t + 14
         mode = self.mode
@@ -680,13 +674,10 @@ class Bot:
         self.fight_label = ""
         if "lightning" in held and "laser" in ew and d > 40:
             pref = 25.0  # rush: lightning shorts their laser
-        weak = P["finish"] and (target.get("hp") or 1400) / max(1, target.get("max_hp") or 1400) < P["finish_hp"]
         if not los:
             # find them: go toward their last position (but not too eagerly if far)
             mv = self.plan_move(pos, (tp[0], tp[1]), t)
-            return mv, me["energy"] > (20 if weak else 60)
-        if weak:
-            pref = min(pref, 45.0)  # close in so they can't slip away
+            return mv, me["energy"] > 60
         radial = max(-1.0, min(1.0, (d - pref) / 25.0))
         mv = (to[0] * radial + perp[0], to[1] * radial + perp[1])
         mv = norm2(*mv)
@@ -865,6 +856,14 @@ class Bot:
                         fire[li] = False  # release -> fires
                     else:
                         fire[li] = True
+            elif laser and kind == "mech" and not los and P["precharge"] and d < P["precharge_r"] \
+                    and (laser["cooldown"] <= 0.02 or laser_busy) \
+                    and target is not None and t - self.enemies.get(target["id"], {}).get("t", -99) < 2.5:
+                # behind cover: charge now, so the moment we see them again we fire a full shot
+                full = laser["stats"].get("charge", 0.75)
+                hold = laser["stats"].get("hold_s", 2.0)
+                fire[li] = laser.get("charge", 0) < full + hold - 0.3
+                aim = self.aim_to(mz, c)
             elif laser_busy:
                 # charging but lost the shot: keep holding, aim at last known
                 fire[li] = True
