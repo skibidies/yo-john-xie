@@ -17,8 +17,8 @@ from worldmap import WorldMap
 TAU = 2 * math.pi
 # Tunable knobs (see README: change these, resubmit, compare scores)
 P = {
-    "retreat_hp": 0.5,        # retreat below this HP fraction when the enemy is healthier
-    "retreat_hp_outnumbered": 0.65,
+    "retreat_hp": 0.6,        # retreat below this HP fraction when the enemy is healthier
+    "retreat_hp_outnumbered": 0.75,
     "retreat_exit_hp": 0.9,    # come back out once regenerated to this
     "range_gun": 55.0,         # preferred fighting distance with gun only
     "range_laser": 95.0,
