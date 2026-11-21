@@ -17,9 +17,9 @@ from worldmap import WorldMap
 TAU = 2 * math.pi
 # Tunable knobs (see README: change these, resubmit, compare scores)
 P = {
-    "retreat_hp": 0.35,        # retreat below this HP fraction when the enemy is healthier
-    "retreat_hp_outnumbered": 0.5,
-    "retreat_exit_hp": 0.8,    # come back out once regenerated to this
+    "retreat_hp": 0.5,        # retreat below this HP fraction when the enemy is healthier
+    "retreat_hp_outnumbered": 0.65,
+    "retreat_exit_hp": 0.9,    # come back out once regenerated to this
     "range_gun": 55.0,         # preferred fighting distance with gun only
     "range_laser": 95.0,
     "range_lightning": 28.0,
@@ -27,8 +27,9 @@ P = {
     "duck": True,              # hide from enemy laser charges / between our laser shots
     "seek": True,              # early game: spin-scan and explore for a laser/lightning
     "seek_t": 120.0,
-    "hide_multi": False,        # vs 2+ enemies: break line of sight, fight only those who come close
+    "hide_multi": True,        # vs 2+ enemies: break line of sight, fight only those who come close
     "hide_close": 45.0,
+    "farm": True,              # walk to crates / drones for cubes when calm
 }
 # How much we like each weapon in slot 1 (we always keep the gun in slot 0)
 WEAPON_RANK = {"laser": 4.0, "lightning": 3.0, "mortar": -5.0, "gun": 0.0}
@@ -764,7 +765,28 @@ class Bot:
                 bs, best, why = s, (p[0], p[1], p[2]), "drop"
         if best is not None:
             return best, why
-        # shootable things: crates / drones -> stand within range and let aim_and_fire do it
+        # shootable things: crates / drones -> walk until we have a shot; aim_and_fire shoots them
+        if P["farm"] and hp_frac > 0.6:
+            fb, fs = None, 1e18
+            for cid, (p, chp, ts) in self.crates.items():
+                if t - ts > 60 or not self.in_circle(p, circ, -5) or p[2] - pos[2] > 3.0:
+                    continue
+                d = dist2(pos, p)
+                if d < 150 and d < fs:
+                    fs, fb = d, (p[0], p[1])
+            for nid, n in self.npcs.items():
+                if t - n["t"] > 3 or (n.get("hp") or 350) <= 0:
+                    continue
+                p = n["pos"]
+                d = dist2(pos, p)
+                if d < 150 and self.in_circle(p, circ, -5) and d - 20 < fs:
+                    fs, fb = d - 20, (p[0], p[1])
+            if fb is not None:
+                mz = self.muzzle()
+                tgt = (fb[0], fb[1], self.map.surface_at(*fb) + 1.5)
+                if dist2(pos, fb) > 60 or not self.map.los(mz, tgt):
+                    return fb, "farm"
+                return (pos[0], pos[1]), "farm-shoot"
         return None, ""
 
     def try_take(self, obs, act):
