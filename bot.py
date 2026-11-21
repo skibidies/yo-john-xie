@@ -25,9 +25,13 @@ P = {
     "range_lightning": 28.0,
     "boost_on": 65.0,          # start boost-strafing above this energy
     "duck": True,              # hide from enemy laser charges / between our laser shots
+    "seek": True,              # early game: spin-scan and explore for a laser/lightning
+    "seek_t": 120.0,
+    "hide_multi": True,        # vs 2+ enemies: break line of sight, fight only those who come close
+    "hide_close": 45.0,
 }
 # How much we like each weapon in slot 1 (we always keep the gun in slot 0)
-WEAPON_RANK = {"laser": 4.0, "lightning": 3.0, "mortar": 1.5, "gun": 0.0}
+WEAPON_RANK = {"laser": 4.0, "lightning": 3.0, "mortar": -5.0, "gun": 0.0}
 # Upgrade preference (higher first). Weapon upgrades only apply to weapons we hold.
 UPGRADE_RANK = {
     "armor": 100, "plating": 95, "nanites": 80, "laser_charge": 78, "laser_damage": 76,
@@ -398,6 +402,24 @@ class Bot:
         self.cover_t = t
         return best
 
+    def explore_goal(self, pos, circ, t):
+        g = getattr(self, "exp_goal", None)
+        if g is not None and t - self.exp_t < 8 and dist2(pos, g) > 6 and self.in_circle(g, circ, 0):
+            return g
+        c, r = circ
+        best, bs = None, 1e18
+        for _ in range(30):
+            a = self.rng.random() * TAU
+            rr = self.rng.uniform(50, 110)
+            p = (pos[0] + math.cos(a) * rr, pos[1] + math.sin(a) * rr)
+            if not self.map.free_at(*p) or not self.in_circle(p, circ, -10):
+                continue
+            s = dist2(p, c) * 0.4 + self.rng.random() * 40
+            if s < bs:
+                bs, best = s, p
+        self.exp_goal, self.exp_t = best, t
+        return best
+
     def idle_spot(self, pos, circ, t):
         """A quiet spot near a building inside the safe circle."""
         if self.idle_goal and t - self.idle_t < 12 and self.in_circle(self.idle_goal, circ, 0):
@@ -516,6 +538,9 @@ class Bot:
             label = "under fire"
         else:
             goal, why = self.loot_goal(obs, circ, hp_frac)
+            if goal is None and P["seek"] and me["weapons"][1] is None and t < P["seek_t"]:
+                goal = self.explore_goal(pos, circ, t)
+                why = "explore"
             if goal is None:
                 goal = self.idle_spot(pos, circ, t)
                 why = "hold"
@@ -618,6 +643,14 @@ class Bot:
             duck = True
         # gun-only vs a laser at range: don't trade, wait at a corner for them to come close
         ambush = ("laser" in ew and not (held & {"laser", "lightning"}) and d > 60)
+        others = [e for e in self.enemies.values() if e["id"] != target["id"] and t - e["t"] < 3
+                  and dist2(pos, e["pos"]) < 230]
+        if P["hide_multi"] and others and d > P["hide_close"] and not my_charging:
+            tps = [(e["pos"][0], e["pos"][1], e["pos"][2] + 8) for e in others + [target]]
+            cov = self.find_cover(pos, tps, circ, t, radii=(5, 9, 14, 20, 28, 38, 50, 65))
+            if cov is not None:
+                self.fight_label = "hide"
+                return self.plan_move(pos, cov, t), me["energy"] > 20
         if (duck or ambush) and P["duck"] and t - target["t"] < 1.0:
             cov = self.find_cover(pos, [teye], circ, t, radii=(5, 8, 12) if duck else (6, 10, 17, 27))
             if cov is not None:
@@ -842,6 +875,8 @@ class Bot:
                 aim = self.aim_to(mz, self.center_of(target))
             elif tb is not None:
                 aim = [tb, 0.0]
+            elif P["seek"] and me["weapons"][1] is None and t < P["seek_t"]:
+                aim = [wrap(self.scan_phase + t * 3.2), -0.05]  # spin to spot weapons
             else:
                 mv = math.atan2(move[1], move[0]) if math.hypot(*move) > 0.1 else ay
                 aim = [wrap(mv + 1.9 * math.sin(t * 1.3 + self.scan_phase)), 0.0]
