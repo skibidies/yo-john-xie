@@ -30,8 +30,8 @@ P = {
     "hide_multi": True,        # vs 2+ enemies: break line of sight, fight only those who come close
     "hide_close": 45.0,
     "stealth": True,           # opening: hide in an enclosed spot, stay silent, let the others thin out
-    "stealth_t": 100.0,        # stealth lasts until this match time...
-    "stealth_alive": 11,       # ...or until this few mechs are left
+    "stealth_t": 420.0,        # stealth lasts until this match time...
+    "stealth_alive": 5,        # ...or until this few mechs are left
     "stealth_close": 40.0,     # an enemy closer than this (or being hit) ends stealth for the moment
     "stealth_engaged_s": 10.0, # after being hit, keep fighting this long instead of going quiet
     "tree_min_r": 5.0,         # crowns at least this wide hide a mech standing at their center
